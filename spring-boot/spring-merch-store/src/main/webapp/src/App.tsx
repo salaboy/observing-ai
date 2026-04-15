@@ -396,7 +396,6 @@ export default function App() {
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const [testMode, setTestMode] = useState(false)
   const [conversationId] = useState(() => crypto.randomUUID())
   const bottomRef = useRef<HTMLDivElement>(null)
   const [tick, setTick] = useState(true)
@@ -404,7 +403,7 @@ export default function App() {
   useEffect(() => {
     fetch('/api/config')
       .then(res => res.json())
-      .then(data => setTestMode(data.testMode))
+      .then(_data => {})
       .catch(() => {})
   }, [])
 
@@ -664,7 +663,7 @@ export default function App() {
       >
         SEND &gt;&gt;
       </button>
-      {testMode && <button
+      <button
         onClick={() => sendMessageSync()}
         disabled={loading || !input.trim()}
         style={{
@@ -679,7 +678,7 @@ export default function App() {
         }}
       >
         SYNC &gt;&gt;
-      </button>}
+      </button>
     </div>
   ) : (
     <div style={{
@@ -713,7 +712,7 @@ export default function App() {
       >
         Send
       </button>
-      {testMode && <button
+      <button
         onClick={() => sendMessageSync()}
         disabled={loading || !input.trim()}
         style={{
@@ -726,7 +725,7 @@ export default function App() {
         }}
       >
         SendSync
-      </button>}
+      </button>
     </div>
   )
 
