@@ -1,0 +1,20 @@
+[project]
+name = "python-merch-store"
+version = "0.1.0"
+description = "Python Merch Store chatbot powered by LangChain and Claude"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "langchain>=0.3",
+    "langchain-anthropic>=0.3",
+    "langgraph>=0.3",
+    "pydantic>=2.0",
+    "sse-starlette>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["python-dotenv>=1.0"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
