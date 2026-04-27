@@ -118,6 +118,9 @@ func main() {
 		AllowCredentials: false,
 	}))
 
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Proxy Active, you can send requests now."))
+	})
 	r.Post("/api/chat/stream", handleChatStream)
 	r.Delete("/api/sessions/{sessionID}", handleDeleteSession)
 
@@ -147,7 +150,14 @@ func createSession() (*Session, error) {
 		"--input-format", "stream-json",
 	}
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	claudeBin := "claude"
+	if v := os.Getenv("CLAUDE_BIN"); v != "" {
+		claudeBin = v
+	}
+
+	log.Printf("session: spawning %s with args %v", claudeBin, args)
+
+	cmd := exec.CommandContext(ctx, claudeBin, args...)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -161,7 +171,23 @@ func createSession() (*Session, error) {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 
-	cmd.Stderr = os.Stderr // surface claude errors in server logs
+	// Capture stderr in a dedicated goroutine so we can log each line with a prefix.
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	// Log relevant environment variables (redact the key).
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		log.Printf("session: WARNING — ANTHROPIC_API_KEY is not set")
+	} else {
+		log.Printf("session: ANTHROPIC_API_KEY is set (%d chars, ends ...%s)", len(apiKey), apiKey[max(0, len(apiKey)-4):])
+	}
+	if v := os.Getenv("CLAUDE_CODE_USE_BEDROCK"); v != "" {
+		log.Printf("session: CLAUDE_CODE_USE_BEDROCK=%s", v)
+	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -169,6 +195,8 @@ func createSession() (*Session, error) {
 	}
 
 	id := generateID()
+	log.Printf("session %s: process started (pid %d)", id, cmd.Process.Pid)
+
 	s := &Session{
 		ID:     id,
 		cmd:    cmd,
@@ -185,17 +213,33 @@ func createSession() (*Session, error) {
 		for scanner.Scan() {
 			line := scanner.Text()
 			if line != "" {
+				log.Printf("session %s: stdout: %s", s.ID, truncate(line, 256))
 				s.lines <- line
 			}
 		}
-		_ = cmd.Wait()
+		if err := scanner.Err(); err != nil {
+			log.Printf("session %s: stdout scanner error: %v", s.ID, err)
+		}
+		waitErr := cmd.Wait()
+		if waitErr != nil {
+			log.Printf("session %s: process exited with error: %v", s.ID, waitErr)
+		}
 		close(s.done)
 		mgr.Delete(s.ID)
-		log.Printf("session %s: process exited", s.ID)
+		log.Printf("session %s: process exited (err=%v)", s.ID, waitErr)
+	}()
+
+	// Background reader for stderr.
+	go func() {
+		scanner := bufio.NewScanner(stderrPipe)
+		scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
+		for scanner.Scan() {
+			log.Printf("session %s: stderr: %s", s.ID, scanner.Text())
+		}
 	}()
 
 	mgr.Set(id, s)
-	log.Printf("session %s: created", id)
+	log.Printf("session %s: created, waiting for init event…", id)
 	return s, nil
 }
 
@@ -210,23 +254,29 @@ func handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("chat: prompt=%q session_id=%q", truncate(req.Prompt, 100), req.SessionID)
+
 	var s *Session
 	var isNew bool
 
 	if req.SessionID != "" {
 		s = mgr.Get(req.SessionID)
 		if s == nil {
+			log.Printf("chat: session %s not found", req.SessionID)
 			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
 			return
 		}
+		log.Printf("chat: reusing session %s", s.ID)
 	} else {
 		var err error
 		s, err = createSession()
 		if err != nil {
+			log.Printf("chat: failed to create session: %v", err)
 			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
 			return
 		}
 		isNew = true
+		log.Printf("chat: new session %s", s.ID)
 	}
 
 	// One turn at a time per session.
@@ -280,31 +330,49 @@ func handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // waitForInit reads events until the system/init message arrives, forwarding
-// everything to the SSE client. Gives up after 30 seconds.
+// everything to the SSE client. Gives up after initTimeout.
 func waitForInit(s *Session, w http.ResponseWriter, flusher http.Flusher) error {
-	timeout := time.After(30 * time.Second)
+	initTimeout := 60 * time.Second
+	if v := os.Getenv("CLAUDE_INIT_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			initTimeout = d
+		}
+	}
+
+	log.Printf("session %s: waiting for init event (timeout %s)", s.ID, initTimeout)
+	start := time.Now()
+	timeout := time.After(initTimeout)
+	eventsReceived := 0
+
 	for {
 		select {
 		case line := <-s.lines:
+			eventsReceived++
 			if !json.Valid([]byte(line)) {
+				log.Printf("session %s: init: skipping non-JSON line #%d: %s", s.ID, eventsReceived, truncate(line, 200))
 				continue
 			}
-			fmt.Fprintf(w, "data: %s\n\n", line)
-			flusher.Flush()
 
 			var ev struct {
 				Type    string `json:"type"`
 				Subtype string `json:"subtype"`
 			}
-			if json.Unmarshal([]byte(line), &ev) == nil {
-				if ev.Type == "system" && ev.Subtype == "init" {
-					return nil
-				}
+			_ = json.Unmarshal([]byte(line), &ev)
+			log.Printf("session %s: init: event #%d type=%q subtype=%q (elapsed %s)", s.ID, eventsReceived, ev.Type, ev.Subtype, time.Since(start).Round(time.Millisecond))
+
+			fmt.Fprintf(w, "data: %s\n\n", line)
+			flusher.Flush()
+
+			if ev.Type == "system" && ev.Subtype == "init" {
+				log.Printf("session %s: init complete after %s (%d events)", s.ID, time.Since(start).Round(time.Millisecond), eventsReceived)
+				return nil
 			}
 		case <-s.done:
+			log.Printf("session %s: claude process exited during init after %s (%d events received)", s.ID, time.Since(start).Round(time.Millisecond), eventsReceived)
 			return fmt.Errorf("claude process exited during initialization")
 		case <-timeout:
-			return fmt.Errorf("timeout waiting for claude to initialize")
+			log.Printf("session %s: init TIMEOUT after %s (%d events received)", s.ID, time.Since(start).Round(time.Millisecond), eventsReceived)
+			return fmt.Errorf("timeout waiting for claude to initialize (waited %s, got %d events)", initTimeout, eventsReceived)
 		}
 	}
 }
@@ -340,4 +408,12 @@ func writeSSEError(w http.ResponseWriter, flusher http.Flusher, msg string) {
 	data, _ := json.Marshal(map[string]string{"type": "error", "error": msg})
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
+}
+
+// truncate shortens a string to at most n characters for log readability.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
