@@ -522,7 +522,7 @@ export default function App() {
         userSelect: 'none',
       }}>
         <span style={{ fontSize: '14px' }}>🐍</span>
-        Python Merch Store — Microsoft Internet Explorer
+        <a href="">Python Merch Store (OTel Langchain Traceloop)</a>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '2px' }}>
           {['_', '□', '✕'].map(btn => (
             <div key={btn} style={{
@@ -616,7 +616,7 @@ export default function App() {
       gap: '10px',
     }}>
       <span>🐍</span>
-      Python Merch Store
+      <a href="">Python Merch Store (OTel Langchain Traceloop)</a>
       <ThemeToggle theme={theme} onToggle={toggleTheme} />
     </div>
   )
