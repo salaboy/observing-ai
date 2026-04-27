@@ -518,7 +518,7 @@ export default function App() {
         userSelect: 'none',
       }}>
         <span style={{ fontSize: '14px' }}>🌱</span>
-        Spring Merch Store — Microsoft Internet Explorer
+        <a href="https://github.com/salaboy/observing-ai/tree/main/java/spring-ai/spring-merch-store">Spring Merch Store (Spring AI)</a>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '2px' }}>
           {['_', '□', '✕'].map(btn => (
             <div key={btn} style={{
@@ -612,7 +612,7 @@ export default function App() {
       gap: '10px',
     }}>
       <span>🌱</span>
-      Spring Merch Store
+      <a href="https://github.com/salaboy/observing-ai/tree/main/java/spring-ai/spring-merch-store">Spring Merch Store (Spring AI)</a>
       <ThemeToggle theme={theme} onToggle={toggleTheme} />
     </div>
   )
